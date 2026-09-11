@@ -1,0 +1,75 @@
+name: Windows trailing-space parent traversal validation
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/trailing-space-parent.yml"
+permissions: {}
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audited current main
+        shell: pwsh
+        run: python -m pip install "huggingface_hub @ git+https://github.com/huggingface/huggingface_hub@129bbb5cf1a7ca2128636eca1695c9960bddd5ca"
+      - name: Test Win32 canonicalization bypass candidates
+        shell: pwsh
+        run: |
+          @'
+          import shutil
+          from pathlib import Path
+          from huggingface_hub._local_folder import _validate_relative_filename, get_local_download_paths
+
+          candidates = [
+              ("dotdot-space", ".. /escaped.txt"),
+              ("dotdot-two-spaces", "..  /escaped.txt"),
+              ("three-dots", ".../escaped.txt"),
+              ("four-dots", "..../escaped.txt"),
+              ("dotdot-space-dot", ".. ./escaped.txt"),
+              ("dot-space", ". /escaped.txt"),
+              ("control-dotdot", "../escaped.txt"),
+          ]
+
+          root = Path.cwd() / "path-cases"
+          payload = Path.cwd() / "CANARY_SOURCE.txt"
+          payload.write_text("HARMLESS_WINDOWS_PATH_CANARY", encoding="utf-8")
+          escaped = []
+
+          for index, (label, filename) in enumerate(candidates):
+              base = root / f"case-{index}"
+              local_dir = base / "download"
+              local_dir.mkdir(parents=True, exist_ok=True)
+              outside = base / "escaped.txt"
+              accepted = True
+              try:
+                  _validate_relative_filename(filename)
+                  paths = get_local_download_paths(local_dir, filename)
+                  shutil.copyfile(payload, paths.file_path)
+                  error = None
+              except Exception as exc:
+                  accepted = False
+                  paths = None
+                  error = f"{type(exc).__name__}: {exc}"
+
+              outside_exists = outside.is_file()
+              inside_exists = (local_dir / "escaped.txt").is_file()
+              print({
+                  "label": label,
+                  "filename": repr(filename),
+                  "accepted_and_written": accepted,
+                  "computed_path": str(paths.file_path) if paths else None,
+                  "outside_exists": outside_exists,
+                  "inside_exists": inside_exists,
+                  "error": error,
+              })
+              if outside_exists:
+                  escaped.append(label)
+
+          print("ESCAPED_CASES=", escaped)
+          print("CONFIRMED_PARENT_TRAVERSAL=", bool(escaped))
+          '@ | Set-Content -Path test_trailing_space_parent.py
+          python test_trailing_space_parent.py
