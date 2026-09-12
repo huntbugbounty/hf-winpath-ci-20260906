@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download as the real warning job does
-        uses: ydshieh/download-artifact@034d574170fc2fbcc74842d25304666dad52f1ad
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: warnings_in_ci
           github-token: ${{ secrets.GITHUB_TOKEN }}
